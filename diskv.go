@@ -59,6 +59,11 @@ type Diskv struct {
 	Options
 	mu        sync.RWMutex
 	cache     map[string][]byte
+
+	// RLS 7/7/2017
+	// Dirty is used to record any changed keys which haven't been persisted to disk yet.
+	dirty 	  map[string]bool
+
 	cacheSize uint64
 }
 
@@ -82,6 +87,7 @@ func New(o Options) *Diskv {
 	d := &Diskv{
 		Options:   o,
 		cache:     map[string][]byte{},
+		dirty:	   map[string]bool{},
 		cacheSize: 0,
 	}
 
@@ -98,6 +104,44 @@ func New(o Options) *Diskv {
 func (d *Diskv) Write(key string, val []byte) error {
 	return d.WriteStream(key, bytes.NewBuffer(val), false)
 }
+
+// Writes a key-value pair to memory only. To persist, the caller must occasionally
+// call Persist().
+// RLS 7/7/2017
+func (d *Diskv) WriteMem(key string, val []byte) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	err := d.cacheWithLock(key, val)
+	d.dirty[key] = true
+
+	return err
+}
+
+// Writes any keys in the dirty map to disk, then flushes the dirty map
+func (d *Diskv) Persist() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	for k := range d.dirty {
+		// Get the value
+		val, ok := d.cache[k];
+
+		if ok {
+			//fmt.Printf("PERSIST: key:%s val:%v\n", k, val)
+			// Persist and make sure the files are synchronized because
+			// the next read will come from disk.
+			d.writeStreamWithLock(k, bytes.NewBuffer(val), true)
+
+		}
+
+
+	}
+
+	// Clear the dirty map by assigning a new one
+	d.dirty = make(map[string]bool)
+}
+
 
 // WriteStream writes the data represented by the io.Reader to the disk, under
 // the provided key. If sync is true, WriteStream performs an explicit sync on
@@ -215,12 +259,22 @@ func (d *Diskv) Import(srcFilename, dstKey string, move bool) (err error) {
 // If the key is not in the cache, Read will have the side-effect of
 // lazily caching the value.
 func (d *Diskv) Read(key string) ([]byte, error) {
+
+	//val1, ok1 := d.cache[key];
+	//fmt.Printf("\n *** Read before ReadStream [%s/%s] - key found? val: %v  ok: %s\n", key, d.BasePath, val1, ok1)
+
+
 	rc, err := d.ReadStream(key, false)
 	if err != nil {
 		return []byte{}, err
 	}
 	defer rc.Close()
-	return ioutil.ReadAll(rc)
+	ret, reterr := ioutil.ReadAll(rc)
+
+	//val, ok := d.cache[key];
+	//fmt.Printf("Read after ReadAll [%s/%s] - key found? val: %v  ok: %s\n", key, d.BasePath, val, ok)
+
+	return ret, reterr
 }
 
 // ReadStream reads the key and returns the value (data) as an io.ReadCloser.
@@ -237,9 +291,13 @@ func (d *Diskv) ReadStream(key string, direct bool) (io.ReadCloser, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	if val, ok := d.cache[key]; ok {
+	val, ok := d.cache[key];
+
+	if ok {
 		if !direct {
 			buf := bytes.NewBuffer(val)
+			// See if val had the right size here..
+			//fmt.Printf("  *** DISKV: key: %s  val: %v %d\n", key, val, len(val))
 			if d.Compression != nil {
 				return d.Compression.Reader(buf)
 			}
@@ -262,7 +320,6 @@ func (d *Diskv) ReadStream(key string, direct bool) (io.ReadCloser, error) {
 // calling read.
 func (d *Diskv) readWithRLock(key string) (io.ReadCloser, error) {
 	filename := d.completeFilename(key)
-
 	fi, err := os.Stat(filename)
 	if err != nil {
 		return nil, err
@@ -280,6 +337,7 @@ func (d *Diskv) readWithRLock(key string) (io.ReadCloser, error) {
 	if d.CacheSizeMax > 0 {
 		r = newSiphon(f, d, key)
 	} else {
+		fmt.Printf("readWithRLock: closingReader\n")
 		r = &closingReader{f}
 	}
 
@@ -341,6 +399,7 @@ func (s *siphon) Read(p []byte) (int, error) {
 
 	if err == io.EOF {
 		s.d.cacheWithoutLock(s.key, s.buf.Bytes()) // cache may fail
+
 		if closeErr := s.f.Close(); closeErr != nil {
 			return n, closeErr // close must succeed for Read to succeed
 		}
@@ -381,6 +440,23 @@ func (d *Diskv) Erase(key string) error {
 	return nil
 }
 
+// Flush synchronously erases the given key from just the cache. This is useful
+// if the cache has become corrupted somehow and you want the next call to get the
+// value from disk.
+// RLS 7-7-2017
+func (d *Diskv) Flush(key string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.bustCacheWithLock(key)
+
+	// erase from index
+	if d.Index != nil {
+		d.Index.Delete(key)
+	}
+
+	return nil
+}
 // EraseAll will delete all of the data from the store, both in the cache and on
 // the disk. Note that EraseAll doesn't distinguish diskv-related data from non-
 // diskv-related data. Care should be taken to always specify a diskv base
@@ -494,6 +570,8 @@ func (d *Diskv) cacheWithLock(key string, val []byte) error {
 
 	d.cache[key] = val
 	d.cacheSize += valueSize
+
+
 	return nil
 }
 
@@ -501,6 +579,7 @@ func (d *Diskv) cacheWithLock(key string, val []byte) error {
 func (d *Diskv) cacheWithoutLock(key string, val []byte) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
 	return d.cacheWithLock(key, val)
 }
 
