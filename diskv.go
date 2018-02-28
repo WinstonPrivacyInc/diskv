@@ -684,9 +684,9 @@ func (d *Diskv) ensureCacheSpaceWithLock(valueSize uint64) error {
 	// Clears out 50% of the cache to avoid thrashing when it fills up
 	safe := func() bool { return (d.cacheSize + valueSize) <= d.CacheSizeMax / 2 }
 
-	//if !safe() {
-	//	fmt.Printf("  ensureCacheSpaceWithLock: cachesize=%d  keyvaluesize=%d  maxsize=%d  BasePath=%s\n", d.cacheSize, valueSize, d.CacheSizeMax, d.BasePath)
-	//}
+	if !safe() {
+		fmt.Printf("  ensureCacheSpaceWithLock: cachesize=%d  keyvaluesize=%d  maxsize=%d  BasePath=%s\n", d.cacheSize, valueSize, d.CacheSizeMax, d.BasePath)
+	}
 	for key, val := range d.cache {
 		if safe() {
 			break
