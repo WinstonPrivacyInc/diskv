@@ -640,6 +640,7 @@ func (d *Diskv) bustCacheWithLock(key string) {
 
 func (d *Diskv) uncacheWithLock(key string, sz uint64) {
 	d.cacheSize -= sz
+	//fmt.Printf("  *** removing key: [%s] new cache size: %d\n", key, d.cacheSize)
 	delete(d.cache, key)
 }
 
@@ -679,8 +680,13 @@ func (d *Diskv) ensureCacheSpaceWithLock(valueSize uint64) error {
 		return fmt.Errorf("value size (%d bytes) too large for cache (%d bytes)", valueSize, d.CacheSizeMax)
 	}
 
-	safe := func() bool { return (d.cacheSize + valueSize) <= d.CacheSizeMax }
+	// RLS 2/28/2018
+	// Clears out 50% of the cache to avoid thrashing when it fills up
+	safe := func() bool { return (d.cacheSize + valueSize) <= d.CacheSizeMax / 2 }
 
+	//if !safe() {
+	//	fmt.Printf("  ensureCacheSpaceWithLock: cachesize=%d  keyvaluesize=%d  maxsize=%d  BasePath=%s\n", d.cacheSize, valueSize, d.CacheSizeMax, d.BasePath)
+	//}
 	for key, val := range d.cache {
 		if safe() {
 			break
@@ -689,9 +695,10 @@ func (d *Diskv) ensureCacheSpaceWithLock(valueSize uint64) error {
 		d.uncacheWithLock(key, uint64(len(val)))
 	}
 
-	if !safe() {
-		panic(fmt.Sprintf("%d bytes still won't fit in the cache! (max %d bytes)", valueSize, d.CacheSizeMax))
-	}
+	// We won't panic here. Instead, let the key be inserted even if we go over the maximum cache size.
+	//if !safe() {
+	//	panic(fmt.Sprintf("%d bytes still won't fit in the cache! (max %d bytes) - cache loc: %s", valueSize, d.CacheSizeMax, d.BasePath))
+	//}
 
 	return nil
 }
