@@ -129,23 +129,28 @@ func (d *Diskv) Persist() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	d.PersistWithLock()
+}
+
+func (d *Diskv) PersistWithLock() {
 	for k := range d.dirty {
 		// Get the value
-		val, ok := d.cache[k];
-
-		if ok {
-			//fmt.Printf("PERSIST: key:%s val:%v\n", k, val)
-			// Persist and make sure the files are synchronized because
-			// the next read will come from disk.
-			d.writeStreamWithLock(k, bytes.NewBuffer(val), true)
-
-		}
-
-
+		d.PersistKeyWithLock(k)
 	}
 
 	// Clear the dirty map by assigning a new one
 	d.dirty = make(map[string]bool)
+}
+
+func (d *Diskv) PersistKeyWithLock(k string) {
+	// Get the value
+	val, ok := d.cache[k];
+
+	if ok {
+		// Save the key but don't bust the cache.
+		d.writeStreamWithLock(k, bytes.NewBuffer(val), true, false)
+		d.dirty[k] = false
+	}
 }
 
 
@@ -167,7 +172,7 @@ func (d *Diskv) WriteStream(key string, r io.Reader, sync bool) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	return d.writeStreamWithLock(key, r, sync)
+	return d.writeStreamWithLock(key, r, sync, true)
 }
 
 // createKeyFileWithLock either creates the key file directly, or
@@ -199,7 +204,7 @@ func (d *Diskv) createKeyFileWithLock(key string) (*os.File, error) {
 }
 
 // writeStream does no input validation checking.
-func (d *Diskv) writeStreamWithLock(key string, r io.Reader, sync bool) error {
+func (d *Diskv) writeStreamWithLock(key string, r io.Reader, sync bool, bustCache bool) error {
 	if err := d.ensurePathWithLock(key); err != nil {
 		return fmt.Errorf("ensure path: %s", err)
 	}
@@ -231,6 +236,7 @@ func (d *Diskv) writeStreamWithLock(key string, r io.Reader, sync bool) error {
 		return fmt.Errorf("compression close: %s", err)
 	}
 
+
 	if sync {
 		if err := f.Sync(); err != nil {
 			f.Close()           // error deliberately ignored
@@ -239,9 +245,11 @@ func (d *Diskv) writeStreamWithLock(key string, r io.Reader, sync bool) error {
 		}
 	}
 
+
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("file close: %s", err)
 	}
+
 
 	if f.Name() != d.completeFilename(key) {
 		if err := os.Rename(f.Name(), d.completeFilename(key)); err != nil {
@@ -250,12 +258,18 @@ func (d *Diskv) writeStreamWithLock(key string, r io.Reader, sync bool) error {
 		}
 	}
 
+	//fmt.Printf("  *** Cache size after writeStreamWithLock 4: cachesize=%d\n", d.cacheSize)
 	if d.Index != nil {
 		d.Index.Insert(key)
 	}
 
-	d.bustCacheWithLock(key) // cache only on read
+	//fmt.Printf("  *** Cache size after writeStreamWithLock 5: cachesize=%d\n", d.cacheSize)
 
+	if bustCache {
+		d.bustCacheWithLock(key) // cache only on read
+	}
+
+	//fmt.Printf("  *** Cache size after writeStreamWithLock 6: cachesize=%d\n", d.cacheSize)
 	return nil
 }
 
@@ -295,7 +309,7 @@ func (d *Diskv) Import(srcFilename, dstKey string, move bool) (err error) {
 		return err
 	}
 	defer f.Close()
-	err = d.writeStreamWithLock(dstKey, f, false)
+	err = d.writeStreamWithLock(dstKey, f, false, true)
 	if err == nil && move {
 		err = os.Remove(srcFilename)
 	}
@@ -309,13 +323,12 @@ func (d *Diskv) Import(srcFilename, dstKey string, move bool) (err error) {
 func (d *Diskv) Read(key string) ([]byte, error) {
 
 	//val1, ok1 := d.cache[key];
-	//fmt.Printf("\n *** Read before ReadStream [%s/%s] - key found? val: %v  ok: %s\n", key, d.BasePath, val1, ok1)
-
 
 	rc, err := d.ReadStream(key, false)
 	if err != nil {
 		return []byte{}, err
 	}
+
 	defer rc.Close()
 	ret, reterr := ioutil.ReadAll(rc)
 
@@ -336,8 +349,10 @@ func (d *Diskv) Read(key string) ([]byte, error) {
 // If compression is enabled, ReadStream taps into the io.Reader stream prior
 // to decompression, and caches the compressed data.
 func (d *Diskv) ReadStream(key string, direct bool) (io.ReadCloser, error) {
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
+
 
 	val, ok := d.cache[key];
 
@@ -356,6 +371,7 @@ func (d *Diskv) ReadStream(key string, direct bool) (io.ReadCloser, error) {
 			d.uncacheWithLock(key, uint64(len(val)))
 		}()
 	}
+
 
 	return d.readWithRLock(key)
 }
@@ -608,17 +624,24 @@ func (d *Diskv) completeFilename(key string) string {
 // cache. It can fail if the value is larger than the cache's maximum size.
 func (d *Diskv) cacheWithLock(key string, val []byte) error {
 	valueSize := uint64(len(val))
-	if err := d.ensureCacheSpaceWithLock(valueSize); err != nil {
+
+	// RLS 3/14/2018 - If the key is already in the cache, then the value size must be adjusted.
+	var oldValueSize uint64
+	if oldval, ok := d.cache[key]; ok {
+		oldValueSize = uint64(len(oldval))
+	}
+
+	if err := d.ensureCacheSpaceWithLock(valueSize - oldValueSize); err != nil {
 		return fmt.Errorf("%s; not caching", err)
 	}
 
 	// be very strict about memory guarantees
-	if (d.cacheSize + valueSize) > d.CacheSizeMax {
-		panic(fmt.Sprintf("failed to make room for value (%d/%d)", valueSize, d.CacheSizeMax))
+	if (d.cacheSize + valueSize - oldValueSize) > d.CacheSizeMax {
+		panic(fmt.Sprintf("failed to make room for value (%d/%d)", valueSize - oldValueSize, d.CacheSizeMax))
 	}
 
 	d.cache[key] = val
-	d.cacheSize += valueSize
+	d.cacheSize += valueSize - oldValueSize
 
 
 	return nil
@@ -638,9 +661,9 @@ func (d *Diskv) bustCacheWithLock(key string) {
 	}
 }
 
+// Note: do not set mutexes in this function or it can deadlock.
 func (d *Diskv) uncacheWithLock(key string, sz uint64) {
 	d.cacheSize -= sz
-	//fmt.Printf("  *** removing key: [%s] new cache size: %d\n", key, d.cacheSize)
 	delete(d.cache, key)
 }
 
@@ -681,18 +704,43 @@ func (d *Diskv) ensureCacheSpaceWithLock(valueSize uint64) error {
 	}
 
 	// RLS 2/28/2018
-	// Clears out 50% of the cache to avoid thrashing when it fills up
-	safe := func() bool { return (d.cacheSize + valueSize) <= d.CacheSizeMax / 2 }
+	// Clears out 15% of the cache to avoid thrashing when it fills up. If this is set too high, then it has a good
+	// chance of removing the key which is being written.
+	belowlimit := func() bool { return (d.cacheSize + valueSize) <= d.CacheSizeMax }
+	safe := func(minspaceneeded uint64) bool {
+		/*if d.cacheSize <= d.CacheSizeMax - minspaceneeded {
+			fmt.Printf("  *** Cache small enough: size = %d <? %d\n", d.cacheSize, d.CacheSizeMax - minspaceneeded)
+		} else {
+			fmt.Printf("  *** Cache still too big. size = %d <? %d\n", d.cacheSize, d.CacheSizeMax - minspaceneeded)
+		}*/
 
-	if !safe() {
-		fmt.Printf("  ensureCacheSpaceWithLock: cachesize=%d  keyvaluesize=%d  maxsize=%d  BasePath=%s\n", d.cacheSize, valueSize, d.CacheSizeMax, d.BasePath)
+		return d.cacheSize <= d.CacheSizeMax - minspaceneeded
 	}
+
+
+	if belowlimit() {
+		return nil
+	}
+
+	// Save any dirty values because we're about to nuke them.
+	//d.PersistWithLock()
+
+	minspaceneeded := d.CacheSizeMax / 8
+	if minspaceneeded < valueSize {
+		minspaceneeded = valueSize
+	}
+
+	fmt.Printf("  *** ensureCacheSpaceWithLock - cache size currently %d. Need to reduce below %d bytes. (%s)\n", d.cacheSize, d.CacheSizeMax - minspaceneeded, d.BasePath)
+	//fmt.Printf("  *** cache: %+v\n", d.cache)
 	for key, val := range d.cache {
-		if safe() {
+		if safe(minspaceneeded) {
 			break
 		}
 
+		//fmt.Printf("  *** deleting key %s\n", key)
+		d.PersistKeyWithLock(key)
 		d.uncacheWithLock(key, uint64(len(val)))
+		//fmt.Printf("  *** Cache size after delete: cachesize=%d\n", d.cacheSize)
 	}
 
 	// We won't panic here. Instead, let the key be inserted even if we go over the maximum cache size.
