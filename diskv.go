@@ -40,10 +40,11 @@ type TransformFunction func(s string) []string
 
 // Options define a set of properties that dictate Diskv behavior.
 // All values are optional.
+// RLS 3/14/2018 - changed CacheSizeMax type from uint64 to int64 to support negative key sizes
 type Options struct {
 	BasePath     string
 	Transform    TransformFunction
-	CacheSizeMax uint64 // bytes
+	CacheSizeMax int64 // bytes
 	PathPerm     os.FileMode
 	FilePerm     os.FileMode
 	// If TempDir is set, it will enable filesystem atomic writes by
@@ -70,7 +71,7 @@ type Diskv struct {
 	// Dirty is used to record any changed keys which haven't been persisted to disk yet.
 	dirty 	  map[string]bool
 
-	cacheSize uint64
+	cacheSize int64
 }
 
 // New returns an initialized Diskv structure, ready to use.
@@ -258,18 +259,15 @@ func (d *Diskv) writeStreamWithLock(key string, r io.Reader, sync bool, bustCach
 		}
 	}
 
-	//fmt.Printf("  *** Cache size after writeStreamWithLock 4: cachesize=%d\n", d.cacheSize)
 	if d.Index != nil {
 		d.Index.Insert(key)
 	}
 
-	//fmt.Printf("  *** Cache size after writeStreamWithLock 5: cachesize=%d\n", d.cacheSize)
 
 	if bustCache {
 		d.bustCacheWithLock(key) // cache only on read
 	}
 
-	//fmt.Printf("  *** Cache size after writeStreamWithLock 6: cachesize=%d\n", d.cacheSize)
 	return nil
 }
 
@@ -368,7 +366,7 @@ func (d *Diskv) ReadStream(key string, direct bool) (io.ReadCloser, error) {
 		go func() {
 			d.mu.Lock()
 			defer d.mu.Unlock()
-			d.uncacheWithLock(key, uint64(len(val)))
+			d.uncacheWithLock(key, int64(len(val)))
 		}()
 	}
 
@@ -623,15 +621,16 @@ func (d *Diskv) completeFilename(key string) string {
 // cacheWithLock attempts to cache the given key-value pair in the store's
 // cache. It can fail if the value is larger than the cache's maximum size.
 func (d *Diskv) cacheWithLock(key string, val []byte) error {
-	valueSize := uint64(len(val))
+	valueSize := int64(len(val))
 
 	// RLS 3/14/2018 - If the key is already in the cache, then the value size must be adjusted.
-	var oldValueSize uint64
+	var oldValueSize int64
 	if oldval, ok := d.cache[key]; ok {
-		oldValueSize = uint64(len(oldval))
+		oldValueSize = int64(len(oldval))
 	}
 
 	if err := d.ensureCacheSpaceWithLock(valueSize - oldValueSize); err != nil {
+		fmt.Printf("  *** Error: %+v\n", err)
 		return fmt.Errorf("%s; not caching", err)
 	}
 
@@ -642,7 +641,6 @@ func (d *Diskv) cacheWithLock(key string, val []byte) error {
 
 	d.cache[key] = val
 	d.cacheSize += valueSize - oldValueSize
-
 
 	return nil
 }
@@ -657,12 +655,12 @@ func (d *Diskv) cacheWithoutLock(key string, val []byte) error {
 
 func (d *Diskv) bustCacheWithLock(key string) {
 	if val, ok := d.cache[key]; ok {
-		d.uncacheWithLock(key, uint64(len(val)))
+		d.uncacheWithLock(key, int64(len(val)))
 	}
 }
 
 // Note: do not set mutexes in this function or it can deadlock.
-func (d *Diskv) uncacheWithLock(key string, sz uint64) {
+func (d *Diskv) uncacheWithLock(key string, sz int64) {
 	d.cacheSize -= sz
 	delete(d.cache, key)
 }
@@ -698,7 +696,8 @@ func (d *Diskv) pruneDirsWithLock(key string) error {
 
 // ensureCacheSpaceWithLock deletes entries from the cache in arbitrary order
 // until the cache has at least valueSize bytes available.
-func (d *Diskv) ensureCacheSpaceWithLock(valueSize uint64) error {
+// RLS 3/14/2018 - changed valueSize to int64 to support possibility of having negative key size (ie: new key smaller than old key)
+func (d *Diskv) ensureCacheSpaceWithLock(valueSize int64) error {
 	if valueSize > d.CacheSizeMax {
 		return fmt.Errorf("value size (%d bytes) too large for cache (%d bytes)", valueSize, d.CacheSizeMax)
 	}
@@ -707,7 +706,7 @@ func (d *Diskv) ensureCacheSpaceWithLock(valueSize uint64) error {
 	// Clears out 15% of the cache to avoid thrashing when it fills up. If this is set too high, then it has a good
 	// chance of removing the key which is being written.
 	belowlimit := func() bool { return (d.cacheSize + valueSize) <= d.CacheSizeMax }
-	safe := func(minspaceneeded uint64) bool {
+	safe := func(minspaceneeded int64) bool {
 		/*if d.cacheSize <= d.CacheSizeMax - minspaceneeded {
 			fmt.Printf("  *** Cache small enough: size = %d <? %d\n", d.cacheSize, d.CacheSizeMax - minspaceneeded)
 		} else {
@@ -739,7 +738,7 @@ func (d *Diskv) ensureCacheSpaceWithLock(valueSize uint64) error {
 
 		//fmt.Printf("  *** deleting key %s\n", key)
 		d.PersistKeyWithLock(key)
-		d.uncacheWithLock(key, uint64(len(val)))
+		d.uncacheWithLock(key, int64(len(val)))
 		//fmt.Printf("  *** Cache size after delete: cachesize=%d\n", d.cacheSize)
 	}
 
