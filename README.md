@@ -140,7 +140,7 @@ data to be handled efficiently.
  * More thorough benchmarking
  * Your suggestions for use-cases I haven't thought of
  
-## About Our Fork
+## About the Winston Privacy Fork
 
 Our fork contains all of the functionality of the original diskv but with optional support for controlling when the in-memory keys are peristed to storage as well as improved handling for automatic flushing of the cache when it reaches its maximum size, especially when using large keys.
 
