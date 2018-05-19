@@ -707,12 +707,6 @@ func (d *Diskv) ensureCacheSpaceWithLock(valueSize int64) error {
 	// chance of removing the key which is being written.
 	belowlimit := func() bool { return (d.cacheSize + valueSize) <= d.CacheSizeMax }
 	safe := func(minspaceneeded int64) bool {
-		/*if d.cacheSize <= d.CacheSizeMax - minspaceneeded {
-			fmt.Printf("  *** Cache small enough: size = %d <? %d\n", d.cacheSize, d.CacheSizeMax - minspaceneeded)
-		} else {
-			fmt.Printf("  *** Cache still too big. size = %d <? %d\n", d.cacheSize, d.CacheSizeMax - minspaceneeded)
-		}*/
-
 		return d.cacheSize <= d.CacheSizeMax - minspaceneeded
 	}
 
@@ -729,17 +723,13 @@ func (d *Diskv) ensureCacheSpaceWithLock(valueSize int64) error {
 		minspaceneeded = valueSize
 	}
 
-	fmt.Printf("  *** ensureCacheSpaceWithLock - cache size currently %d. Need to reduce below %d bytes. (%s)\n", d.cacheSize, d.CacheSizeMax - minspaceneeded, d.BasePath)
-	//fmt.Printf("  *** cache: %+v\n", d.cache)
 	for key, val := range d.cache {
 		if safe(minspaceneeded) {
 			break
 		}
 
-		//fmt.Printf("  *** deleting key %s\n", key)
 		d.PersistKeyWithLock(key)
 		d.uncacheWithLock(key, int64(len(val)))
-		//fmt.Printf("  *** Cache size after delete: cachesize=%d\n", d.cacheSize)
 	}
 
 	// We won't panic here. Instead, let the key be inserted even if we go over the maximum cache size.
