@@ -142,7 +142,7 @@ data to be handled efficiently.
  
 ## About Our Fork
 
-# Our fork contains all of the functionality of the original diskv but with optional support for controlling when the in-memory keys are peristed to storage as well as improved handling for automatic flushing of the cache when it reaches its maximum size, especially when using large keys.
+Our fork contains all of the functionality of the original diskv but with optional support for controlling when the in-memory keys are peristed to storage as well as improved handling for automatic flushing of the cache when it reaches its maximum size, especially when using large keys.
 
 * If a key is overwritten with a smaller version of itself, the new cache size will be calculated correctly.
 * When the cache reaches its maxmium size, enough keys will be removed to clear 15% of the total space (instead of just a single key). This prevents constant thrashing when reaching the cache limit.
