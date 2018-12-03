@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/peterbourgon/diskv"
+	"github.com/winstonprivacyinc/diskv"
 )
 
 var (

@@ -180,6 +180,7 @@ func (d *Diskv) WriteStream(key string, r io.Reader, sync bool) error {
 // creates a temporary file in TempDir if it is set.
 func (d *Diskv) createKeyFileWithLock(key string) (*os.File, error) {
 	if d.TempDir != "" {
+		//fmt.Println("createKeyFileWithLock - TempDir: %s\n", d.TempDir)
 		if err := os.MkdirAll(d.TempDir, d.PathPerm); err != nil {
 			return nil, fmt.Errorf("temp mkdir: %s", err)
 		}
@@ -197,8 +198,19 @@ func (d *Diskv) createKeyFileWithLock(key string) (*os.File, error) {
 	}
 
 	mode := os.O_WRONLY | os.O_CREATE | os.O_TRUNC // overwrite if exists
+	//fmt.Printf("creating file: %s %s\n", d.BasePath, d.completeFilename(key))
 	f, err := os.OpenFile(d.completeFilename(key), mode, d.FilePerm)
 	if err != nil {
+		fmt.Printf("createKeyFileWithLock [%s]: %+v\n", d.completeFilename(key), d.FilePerm)
+
+		// Try creating it a different way
+		f, err = os.Create(d.completeFilename(key))
+		if err != nil {
+			fmt.Printf("Still couldn't create the file. %+v\n", err)
+		} else {
+			fmt.Println("Created the file")
+		}
+
 		return nil, fmt.Errorf("open file: %s", err)
 	}
 	return f, nil
@@ -207,11 +219,13 @@ func (d *Diskv) createKeyFileWithLock(key string) (*os.File, error) {
 // writeStream does no input validation checking.
 func (d *Diskv) writeStreamWithLock(key string, r io.Reader, sync bool, bustCache bool) error {
 	if err := d.ensurePathWithLock(key); err != nil {
+		fmt.Printf("ensure path: %+v\n", err)
 		return fmt.Errorf("ensure path: %s", err)
 	}
 
 	f, err := d.createKeyFileWithLock(key)
 	if err != nil {
+		fmt.Printf("create key file [%s]: %+v\n", key, err)
 		return fmt.Errorf("create key file: %s", err)
 	}
 
@@ -604,7 +618,8 @@ func walker(c chan<- string, prefix string, cancel <-chan struct{}) filepath.Wal
 // pathFor returns the absolute path for location on the filesystem where the
 // data for the given key will be stored.
 func (d *Diskv) pathFor(key string) string {
-	return filepath.Join(d.BasePath, filepath.Join(d.Transform(key)...))
+	filepath := filepath.Join(d.BasePath, filepath.Join(d.Transform(key)...))
+	return filepath
 }
 
 // ensurePathWithLock is a helper function that generates all necessary

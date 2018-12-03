@@ -5,7 +5,7 @@ import (
 	"io/ioutil"
 	"os"
 
-	"github.com/peterbourgon/diskv"
+	"github.com/winstonprivacyinc/diskv"
 
 	"testing"
 )
